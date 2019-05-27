@@ -5,7 +5,7 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //go:generate go run ../../script/protofmt.go structs.proto
-//go:generate protoc -I ../../../../../ -I ../../vendor/ -I ../../vendor/github.com/gogo/protobuf/protobuf -I . --gogofast_out=. structs.proto
+//go:generate protoc -I ../../ -I . --gogofast_out=Mlib/protocol/bep.proto=github.com/syncthing/syncthing/lib/protocol:. structs.proto
 
 package db
 
@@ -142,6 +142,10 @@ func (c Counts) Add(other Counts) Counts {
 	}
 }
 
+func (c Counts) TotalItems() int32 {
+	return c.Files + c.Directories + c.Symlinks + c.Deleted
+}
+
 func (vl VersionList) String() string {
 	var b bytes.Buffer
 	var id protocol.DeviceID
@@ -160,16 +164,8 @@ func (vl VersionList) String() string {
 // update brings the VersionList up to date with file. It returns the updated
 // VersionList, a potentially removed old FileVersion and its index, as well as
 // the index where the new FileVersion was inserted.
-func (vl VersionList) update(folder, device []byte, file protocol.FileInfo, db *instance) (_ VersionList, removedFV FileVersion, removedAt int, insertedAt int) {
-	removedAt, insertedAt = -1, -1
-	for i, v := range vl.Versions {
-		if bytes.Equal(v.Device, device) {
-			removedAt = i
-			removedFV = v
-			vl.Versions = append(vl.Versions[:i], vl.Versions[i+1:]...)
-			break
-		}
-	}
+func (vl VersionList) update(folder, device []byte, file protocol.FileInfo, t readOnlyTransaction) (_ VersionList, removedFV FileVersion, removedAt int, insertedAt int) {
+	vl, removedFV, removedAt = vl.pop(device)
 
 	nv := FileVersion{
 		Device:  device,
@@ -202,7 +198,7 @@ func (vl VersionList) update(folder, device []byte, file protocol.FileInfo, db *
 			// to determine the winner.)
 			//
 			// A surprise missing file entry here is counted as a win for us.
-			if of, ok := db.getFile(db.keyer.GenerateDeviceFileKey(nil, folder, vl.Versions[i].Device, []byte(file.Name))); !ok || file.WinsConflict(of) {
+			if of, ok := t.getFile(folder, vl.Versions[i].Device, []byte(file.Name)); !ok || file.WinsConflict(of) {
 				vl = vl.insertAt(i, nv)
 				return vl, removedFV, removedAt, i
 			}
@@ -220,6 +216,20 @@ func (vl VersionList) insertAt(i int, v FileVersion) VersionList {
 	copy(vl.Versions[i+1:], vl.Versions[i:])
 	vl.Versions[i] = v
 	return vl
+}
+
+// pop returns the VersionList without the entry for the given device, as well
+// as the removed FileVersion and the position, where that FileVersion was.
+// If there is no FileVersion for the given device, the position is -1.
+func (vl VersionList) pop(device []byte) (VersionList, FileVersion, int) {
+	removedAt := -1
+	for i, v := range vl.Versions {
+		if bytes.Equal(v.Device, device) {
+			vl.Versions = append(vl.Versions[:i], vl.Versions[i+1:]...)
+			return vl, v, i
+		}
+	}
+	return vl, FileVersion{}, removedAt
 }
 
 func (vl VersionList) Get(device []byte) (FileVersion, bool) {

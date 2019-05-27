@@ -1,6 +1,6 @@
 angular.module('syncthing.core')
-    .config(function($locationProvider) {
-        $locationProvider.html5Mode({enabled: true, requireBase: false}).hashPrefix('!');
+    .config(function ($locationProvider) {
+        $locationProvider.html5Mode({ enabled: true, requireBase: false }).hashPrefix('!');
     })
     .controller('SyncthingController', function ($scope, $http, $location, LocaleService, Events, $filter, $q, $compile, $timeout, $rootScope, $translate) {
         'use strict';
@@ -46,6 +46,7 @@ angular.module('syncthing.core')
         $scope.neededCurrentPage = 1;
         $scope.neededPageSize = 10;
         $scope.failed = {};
+        $scope.localChanged = {};
         $scope.scanProgress = {};
         $scope.themes = [];
         $scope.globalChangeEvents = {};
@@ -64,7 +65,7 @@ angular.module('syncthing.core')
             rescanIntervalS: 3600,
             fsWatcherDelayS: 10,
             fsWatcherEnabled: true,
-            minDiskFree: {value: 1, unit: "%"},
+            minDiskFree: { value: 1, unit: "%" },
             maxConflicts: 10,
             fsync: true,
             order: "random",
@@ -76,7 +77,8 @@ angular.module('syncthing.core')
             staggeredVersionsPath: "",
             externalCommand: "",
             autoNormalize: true,
-            path: ""
+            path: "",
+            useLargeBlocks: true,
         };
 
         $scope.localStateTotal = {
@@ -123,6 +125,7 @@ angular.module('syncthing.core')
             refreshThemes();
 
             $http.get(urlbase + '/system/version').success(function (data) {
+                console.log("version", data);
                 if ($scope.version.version && $scope.version.version !== data.version) {
                     // We already have a version response, but it differs from
                     // the new one. Reload the full GUI in case it's changed.
@@ -130,7 +133,6 @@ angular.module('syncthing.core')
                 }
 
                 $scope.version = data;
-                $scope.version.isDevelopmentVersion = data.version.indexOf('-')>0;
             }).error($scope.emitHTTPError);
 
             $http.get(urlbase + '/svc/report').success(function (data) {
@@ -204,7 +206,7 @@ angular.module('syncthing.core')
 
                 // If a folder finished scanning, then refresh folder stats
                 // to update last scan time.
-                if(data.from === 'scanning' && data.to === 'idle') {
+                if (data.from === 'scanning' && data.to === 'idle') {
                     refreshFolderStats();
                 }
             }
@@ -327,7 +329,7 @@ angular.module('syncthing.core')
         });
 
         $scope.$on(Events.FOLDER_ERRORS, function (event, arg) {
-            $scope.model[arg.data.folder].pullErrors = arg.data.errors.length;
+            $scope.model[arg.data.folder].errors = arg.data.errors.length;
         });
 
         $scope.$on(Events.FOLDER_SCAN_PROGRESS, function (event, arg) {
@@ -341,7 +343,7 @@ angular.module('syncthing.core')
         });
 
         $scope.emitHTTPError = function (data, status, headers, config) {
-            $scope.$emit('HTTPError', {data: data, status: status, headers: headers, config: config});
+            $scope.$emit('HTTPError', { data: data, status: status, headers: headers, config: config });
         };
 
         var debouncedFuncs = {};
@@ -355,7 +357,7 @@ angular.module('syncthing.core')
                         recalcLocalStateTotal();
                         console.log("refreshFolder", folder, data);
                     }).error($scope.emitHTTPError);
-                }, 1000, true);
+                }, 1000);
             }
             debouncedFuncs[key]();
         }
@@ -446,7 +448,7 @@ angular.module('syncthing.core')
             }).error($scope.emitHTTPError);
         }
 
-        function recalcLocalStateTotal () {
+        function recalcLocalStateTotal() {
             $scope.localStateTotal = {
                 bytes: 0,
                 directories: 0,
@@ -454,9 +456,9 @@ angular.module('syncthing.core')
             };
 
             for (var f in $scope.model) {
-               $scope.localStateTotal.bytes += $scope.model[f].localBytes;
-               $scope.localStateTotal.files += $scope.model[f].localFiles;
-               $scope.localStateTotal.directories += $scope.model[f].localDirectories;
+                $scope.localStateTotal.bytes += $scope.model[f].localBytes;
+                $scope.localStateTotal.files += $scope.model[f].localFiles;
+                $scope.localStateTotal.directories += $scope.model[f].localDirectories;
             }
         }
 
@@ -477,7 +479,7 @@ angular.module('syncthing.core')
                 $scope.completion[device]._needItems = 0;
             } else {
                 $scope.completion[device]._total = Math.floor(100 * (1 - needed / total));
-                $scope.completion[device]._needBytes = needed
+                $scope.completion[device]._needBytes = needed;
                 $scope.completion[device]._needItems = items + deletes;
             }
 
@@ -651,7 +653,7 @@ angular.module('syncthing.core')
         };
 
         $scope.refreshFailed = function (page, perpage) {
-            var url = urlbase + '/folder/pullerrors?folder=' + encodeURIComponent($scope.failed.folder);
+            var url = urlbase + '/folder/errors?folder=' + encodeURIComponent($scope.failed.folder);
             url += "&page=" + page + "&perpage=" + perpage;
             $http.get(url).success(function (data) {
                 $scope.failed = data;
@@ -670,6 +672,15 @@ angular.module('syncthing.core')
                 $scope.remoteNeed[folder] = undefined;
                 $scope.emitHTTPError(err);
             });
+        };
+
+        $scope.refreshLocalChanged = function (page, perpage) {
+            var url = urlbase + '/db/localchanged?folder=';
+            url += encodeURIComponent($scope.localChangedFolder);
+            url += "&page=" + page + "&perpage=" + perpage;
+            $http.get(url).success(function (data) {
+                $scope.localChanged = data;
+            }).error($scope.emitHTTPError);
         };
 
         var refreshDeviceStats = debounce(function () {
@@ -737,8 +748,11 @@ angular.module('syncthing.core')
             if (state === 'error') {
                 return 'stopped'; // legacy, the state is called "stopped" in the GUI
             }
-            if (state === 'idle' && $scope.neededItems(folderCfg.id) > 0) {
+            if (state === 'idle' && $scope.model[folderCfg.id].needTotalItems > 0) {
                 return 'outofsync';
+            }
+            if ($scope.hasFailedFiles(folderCfg.id)) {
+                return 'faileditems';
             }
             if (state === 'scanning') {
                 return state;
@@ -766,23 +780,14 @@ angular.module('syncthing.core')
             if (status === 'unknown') {
                 return 'info';
             }
-            if (status === 'stopped' || status === 'outofsync' || status === 'error') {
+            if (status === 'stopped' || status === 'outofsync' || status === 'error' || status === 'faileditems') {
                 return 'danger';
             }
-            if (status === 'unshared') {
+            if (status === 'unshared' || status === 'scan-waiting') {
                 return 'warning';
             }
 
             return 'info';
-        };
-
-        $scope.neededItems = function (folderID) {
-            if (!$scope.model[folderID]) {
-                return 0
-            }
-
-            return $scope.model[folderID].needFiles + $scope.model[folderID].needDirectories +
-                $scope.model[folderID].needSymlinks + $scope.model[folderID].needDeletes;
         };
 
         $scope.syncPercentage = function (folder) {
@@ -961,7 +966,7 @@ angular.module('syncthing.core')
             var pendingFolders = 0;
             for (var i = 0; i < $scope.devices.length; i++) {
                 var status = $scope.deviceStatus({
-                    deviceID:$scope.devices[i].deviceID
+                    deviceID: $scope.devices[i].deviceID
                 });
                 switch (status) {
                     case 'unknown':
@@ -995,7 +1000,7 @@ angular.module('syncthing.core')
             }
 
             // all used devices are paused except (this) one
-            if (pauseCount === deviceCount-1) {
+            if (pauseCount === deviceCount - 1) {
                 return 'pause';
             }
 
@@ -1084,11 +1089,11 @@ angular.module('syncthing.core')
 
         $scope.logging = {
             facilities: {},
-            refreshFacilities: function() {
+            refreshFacilities: function () {
                 $http.get(urlbase + '/system/debug').success(function (data) {
                     var facilities = {};
                     data.enabled = data.enabled || [];
-                    $.each(data.facilities, function(key, value) {
+                    $.each(data.facilities, function (key, value) {
                         facilities[key] = {
                             description: value,
                             enabled: data.enabled.indexOf(key) > -1
@@ -1097,12 +1102,12 @@ angular.module('syncthing.core')
                     $scope.logging.facilities = facilities;
                 }).error($scope.emitHTTPError);
             },
-            show: function() {
+            show: function () {
                 $scope.logging.refreshFacilities();
                 $scope.logging.timer = $timeout($scope.logging.fetch);
                 var textArea = $('#logViewerText');
                 textArea.on("scroll", $scope.logging.onScroll);
-                $('#logViewer').modal().one('shown.bs.modal', function() {
+                $('#logViewer').modal().one('shown.bs.modal', function () {
                     // Scroll to bottom.
                     textArea.scrollTop(textArea[0].scrollHeight);
                 }).one('hidden.bs.modal', function () {
@@ -1112,17 +1117,17 @@ angular.module('syncthing.core')
                     $scope.logging.entries = [];
                 });
             },
-            onFacilityChange: function(facility) {
+            onFacilityChange: function (facility) {
                 var enabled = $scope.logging.facilities[facility].enabled;
                 // Disable checkboxes while we're in flight.
-                $.each($scope.logging.facilities, function(key) {
+                $.each($scope.logging.facilities, function (key) {
                     $scope.logging.facilities[key].enabled = null;
                 })
-                $http.post(urlbase + '/system/debug?' + (enabled ? 'enable=':'disable=') + facility)
+                $http.post(urlbase + '/system/debug?' + (enabled ? 'enable=' : 'disable=') + facility)
                     .success($scope.logging.refreshFacilities)
                     .error($scope.emitHTTPError);
             },
-            onScroll: function() {
+            onScroll: function () {
                 var textArea = $('#logViewerText');
                 var scrollTop = textArea.prop('scrollTop');
                 var scrollHeight = textArea.prop('scrollHeight');
@@ -1133,14 +1138,14 @@ angular.module('syncthing.core')
             timer: null,
             entries: [],
             paused: false,
-            content: function() {
+            content: function () {
                 var content = "";
                 $.each($scope.logging.entries, function (idx, entry) {
                     content += entry.when.split('.')[0].replace('T', ' ') + ' ' + entry.message + "\n";
                 });
                 return content;
             },
-            fetch: function() {
+            fetch: function () {
                 var textArea = $('#logViewerText');
                 if ($scope.logging.paused) {
                     if (!$scope.logging.timer) return;
@@ -1150,7 +1155,7 @@ angular.module('syncthing.core')
 
                 var last = null;
                 if ($scope.logging.entries.length > 0) {
-                    last = $scope.logging.entries[$scope.logging.entries.length-1].when;
+                    last = $scope.logging.entries[$scope.logging.entries.length - 1].when;
                 }
 
                 $http.get(urlbase + '/system/log' + (last ? '?since=' + encodeURIComponent(last) : '')).success(function (data) {
@@ -1160,14 +1165,14 @@ angular.module('syncthing.core')
                         if (data.messages) {
                             $scope.logging.entries.push.apply($scope.logging.entries, data.messages);
                             // Wait for the text area to be redrawn, adding new lines, and then scroll to bottom.
-                            $timeout(function() {
+                            $timeout(function () {
                                 textArea.scrollTop(textArea[0].scrollHeight);
                             });
                         }
                     }
                 });
             }
-        }
+        };
 
         $scope.editSettings = function () {
             // Make a working copy
@@ -1190,7 +1195,7 @@ angular.module('syncthing.core')
                 settingsModal.off('hide.bs.modal');
             }).on('hide.bs.modal', function (e) {
                 if ($scope.settingsModified()) {
-                    $("#discard-changes-confirmation").modal().one('hidden.bs.modal', function() {
+                    $("#discard-changes-confirmation").modal().one('hidden.bs.modal', function () {
                         if (!$scope.settingsModified()) {
                             settingsModal.modal('hide');
                         }
@@ -1210,16 +1215,17 @@ angular.module('syncthing.core')
                 }
             };
             $http.post(urlbase + '/system/config', cfg, opts).success(function () {
-                $http.get(urlbase + '/system/config/insync').success(function (data) {
-                    $scope.configInSync = data.configInSync;
-                    if (cb) {
-                        cb();
-                    }
-                });
-            }).error($scope.emitHTTPError);
+                refreshConfig();
+                if (cb) {
+                    cb();
+                }
+            }).error(function (data, status, headers, config) {
+                refreshConfig();
+                $scope.emitHTTPError(data, status, headers, config);
+            });
         };
 
-        $scope.urVersions = function() {
+        $scope.urVersions = function () {
             var result = [];
             if ($scope.system) {
                 for (var i = $scope.system.urVersionMax; i >= 2; i--) {
@@ -1247,7 +1253,7 @@ angular.module('syncthing.core')
             var ignoredFoldersEquals = angular.equals($scope.config.devices, $scope.tmpDevices);
             console.log("settings equals - options: " + optionsEqual + " gui: " + guiEquals + " ignDev: " + ignoredDevicesEquals + " ignFol: " + ignoredFoldersEquals);
             return !optionsEqual || !guiEquals || !ignoredDevicesEquals || !ignoredFoldersEquals;
-        }
+        };
 
         $scope.saveSettings = function () {
             // Make sure something changed
@@ -1356,7 +1362,7 @@ angular.module('syncthing.core')
             $scope.currentDevice = $.extend({}, deviceCfg);
             $scope.editingExisting = true;
             $scope.willBeReintroducedBy = undefined;
-             if (deviceCfg.introducedBy) {
+            if (deviceCfg.introducedBy) {
                 var introducerDevice = $scope.findDevice(deviceCfg.introducedBy);
                 if (introducerDevice && introducerDevice.introducer) {
                     $scope.willBeReintroducedBy = $scope.deviceName(introducerDevice);
@@ -1369,6 +1375,18 @@ angular.module('syncthing.core')
             });
             $scope.deviceEditor.$setPristine();
             $('#editDevice').modal();
+        };
+
+        $scope.selectAllFolders = function () {
+            angular.forEach($scope.folders, function (id) {
+                $scope.currentDevice.selectedFolders[id] = true;
+            });
+        };
+
+        $scope.deSelectAllFolders = function () {
+            angular.forEach($scope.folders, function (id) {
+                $scope.currentDevice.selectedFolders[id] = false;
+            });
         };
 
         $scope.addDevice = function (deviceID, name) {
@@ -1516,7 +1534,7 @@ angular.module('syncthing.core')
 
         $scope.thisDevice = function () {
             return $scope.thisDeviceIn($scope.devices);
-        }
+        };
 
         $scope.thisDeviceIn = function (l) {
             for (var i = 0; i < l.length; i++) {
@@ -1555,7 +1573,7 @@ angular.module('syncthing.core')
                 }
             });
             return errs;
-        }
+        };
 
         $scope.friendlyDevices = function (str) {
             for (var i = 0; i < $scope.devices.length; i++) {
@@ -1606,7 +1624,7 @@ angular.module('syncthing.core')
         };
 
         $scope.loadFormIntoScope = function (form) {
-            console.log('loadFormIntoScope',form.$name);
+            console.log('loadFormIntoScope', form.$name);
             switch (form.$name) {
                 case 'deviceEditor':
                     $scope.deviceEditor = form;
@@ -1692,6 +1710,20 @@ angular.module('syncthing.core')
                 });
 
             $scope.editFolderModal();
+        };
+
+        $scope.selectAllDevices = function () {
+            var devices = $scope.otherDevices();
+            for (var i = 0; i < devices.length; i++) {
+                $scope.currentFolder.selectedDevices[devices[i].deviceID] = true;
+            }
+        };
+
+        $scope.deSelectAllDevices = function () {
+            var devices = $scope.otherDevices();
+            for (var i = 0; i < devices.length; i++) {
+                $scope.currentFolder.selectedDevices[devices[i].deviceID] = false;
+            }
         };
 
         $scope.addFolder = function () {
@@ -1856,7 +1888,7 @@ angular.module('syncthing.core')
             }
             var label = $scope.folders[folderID].label;
             return label && label.length > 0 ? label : folderID;
-        }
+        };
 
         $scope.deleteFolder = function (id) {
             $('#editFolder').modal('hide');
@@ -1881,7 +1913,7 @@ angular.module('syncthing.core')
                 errors: null,
                 filters: {},
                 massAction: function (name, action) {
-                    $.each($scope.restoreVersions.versions, function(key) {
+                    $.each($scope.restoreVersions.versions, function (key) {
                         if (key.startsWith(name + '/') && (!$scope.restoreVersions.filters.text || key.indexOf($scope.restoreVersions.filters.text) > -1)) {
                             if (action == 'unset') {
                                 delete $scope.restoreVersions.selections[key];
@@ -1889,7 +1921,7 @@ angular.module('syncthing.core')
                             }
 
                             var availableVersions = [];
-                            $.each($scope.restoreVersions.filterVersions($scope.restoreVersions.versions[key]), function(idx, version) {
+                            $.each($scope.restoreVersions.filterVersions($scope.restoreVersions.versions[key]), function (idx, version) {
                                 availableVersions.push(version.versionTime);
                             })
 
@@ -1904,8 +1936,8 @@ angular.module('syncthing.core')
                         }
                     });
                 },
-                filterVersions: function(versions) {
-                    var filteredVersions  = [];
+                filterVersions: function (versions) {
+                    var filteredVersions = [];
                     $.each(versions, function (idx, version) {
                         if (moment(version.versionTime).isBetween($scope.restoreVersions.filters['start'], $scope.restoreVersions.filters['end'], null, '[]')) {
                             filteredVersions.push(version);
@@ -1913,9 +1945,9 @@ angular.module('syncthing.core')
                     });
                     return filteredVersions;
                 },
-                selectionCount: function() {
+                selectionCount: function () {
                     var count = 0;
-                    $.each($scope.restoreVersions.selections, function(key, value) {
+                    $.each($scope.restoreVersions.selections, function (key, value) {
                         if (value) {
                             count++;
                         }
@@ -1923,12 +1955,12 @@ angular.module('syncthing.core')
                     return count;
                 },
 
-                restore: function() {
+                restore: function () {
                     $scope.restoreVersions.tree.clear();
                     $scope.restoreVersions.tree = null;
                     $scope.restoreVersions.versions = null;
                     var selections = {};
-                    $.each($scope.restoreVersions.selections, function(key, value) {
+                    $.each($scope.restoreVersions.selections, function (key, value) {
                         if (value) {
                             selections[key] = value;
                         }
@@ -1943,7 +1975,7 @@ angular.module('syncthing.core')
                         }
                     });
                 },
-                show: function(folder) {
+                show: function (folder) {
                     $scope.restoreVersions.folder = folder;
 
                     var closed = false;
@@ -1951,14 +1983,14 @@ angular.module('syncthing.core')
                     $('#restoreVersions').modal().one('hidden.bs.modal', function () {
                         closed = true;
                         resetRestoreVersions();
-                    }).one('shown.bs.modal', function() {
+                    }).one('shown.bs.modal', function () {
                         modalShown.resolve();
                     });
 
                     var dataReceived = $http.get(urlbase + '/folder/versions?folder=' + encodeURIComponent($scope.restoreVersions.folder))
                         .success(function (data) {
-                            $.each(data, function(key, values) {
-                                $.each(values, function(idx, value) {
+                            $.each(data, function (key, values) {
+                                $.each(values, function (idx, value) {
                                     value.modTime = new Date(value.modTime);
                                     value.versionTime = new Date(value.versionTime);
                                 });
@@ -1967,115 +1999,117 @@ angular.module('syncthing.core')
                             $scope.restoreVersions.versions = data;
                         });
 
-                    $q.all([dataReceived, modalShown.promise]).then(function() {
-                        if (closed) {
-                            resetRestoreVersions();
-                            return;
-                        }
-
-                        $scope.restoreVersions.tree = $("#restoreTree").fancytree({
-                            extensions: ["table", "filter"],
-                            quicksearch: true,
-                            filter: {
-                                autoApply: true,
-                                counter: true,
-                                hideExpandedCounter: true,
-                                hideExpanders: true,
-                                highlight: true,
-                                leavesOnly: false,
-                                nodata: true,
-                                mode: "hide"
-                            },
-                            table: {
-                                indentation: 20,
-                                nodeColumnIdx: 0,
-                            },
-                            debugLevel: 2,
-                            source: buildTree($scope.restoreVersions.versions),
-                            renderColumns: function(event, data) {
-                                var node = data.node,
-                                    $tdList = $(node.tr).find(">td"),
-                                    template;
-                                if (node.folder) {
-                                    template = '<div ng-include="\'syncthing/folder/restoreVersionsMassActions.html\'" class="pull-right"/>';
-                                } else {
-                                    template = '<div ng-include="\'syncthing/folder/restoreVersionsVersionSelector.html\'" class="pull-right"/>';
-                                }
-
-                                var scope = $rootScope.$new(true);
-                                scope.key = node.key;
-                                scope.restoreVersions = $scope.restoreVersions;
-
-                                $tdList.eq(1).html(
-                                    $compile(template)(scope)
-                                );
-
-                                // Force angular to redraw.
-                                $timeout(function() {
-                                    $scope.$apply();
-                                });
+                    $q.all([dataReceived, modalShown.promise]).then(function () {
+                        $timeout(function () {
+                            if (closed) {
+                                resetRestoreVersions();
+                                return;
                             }
-                        }).fancytree("getTree");
 
-                        var minDate = moment(),
-                            maxDate = moment(0, 'X'),
-                            date;
+                            $scope.restoreVersions.tree = $("#restoreTree").fancytree({
+                                extensions: ["table", "filter"],
+                                quicksearch: true,
+                                filter: {
+                                    autoApply: true,
+                                    counter: true,
+                                    hideExpandedCounter: true,
+                                    hideExpanders: true,
+                                    highlight: true,
+                                    leavesOnly: false,
+                                    nodata: true,
+                                    mode: "hide"
+                                },
+                                table: {
+                                    indentation: 20,
+                                    nodeColumnIdx: 0,
+                                },
+                                debugLevel: 2,
+                                source: buildTree($scope.restoreVersions.versions),
+                                renderColumns: function (event, data) {
+                                    var node = data.node,
+                                        $tdList = $(node.tr).find(">td"),
+                                        template;
+                                    if (node.folder) {
+                                        template = '<div ng-include="\'syncthing/folder/restoreVersionsMassActions.html\'" class="pull-right"/>';
+                                    } else {
+                                        template = '<div ng-include="\'syncthing/folder/restoreVersionsVersionSelector.html\'" class="pull-right"/>';
+                                    }
 
-                        // Find version window.
-                        $.each($scope.restoreVersions.versions, function(key) {
-                            $.each($scope.restoreVersions.versions[key], function(idx, version) {
-                                date = moment(version.versionTime);
-                                if (date.isBefore(minDate)) {
-                                    minDate = date;
+                                    var scope = $rootScope.$new(true);
+                                    scope.key = node.key;
+                                    scope.restoreVersions = $scope.restoreVersions;
+
+                                    $tdList.eq(1).html(
+                                        $compile(template)(scope)
+                                    );
+
+                                    // Force angular to redraw.
+                                    $timeout(function () {
+                                        $scope.$apply();
+                                    });
                                 }
-                                if (date.isAfter(maxDate)) {
-                                    maxDate = date;
+                            }).fancytree("getTree");
+
+                            var minDate = moment(),
+                                maxDate = moment(0, 'X'),
+                                date;
+
+                            // Find version window.
+                            $.each($scope.restoreVersions.versions, function (key) {
+                                $.each($scope.restoreVersions.versions[key], function (idx, version) {
+                                    date = moment(version.versionTime);
+                                    if (date.isBefore(minDate)) {
+                                        minDate = date;
+                                    }
+                                    if (date.isAfter(maxDate)) {
+                                        maxDate = date;
+                                    }
+                                });
+                            });
+
+                            $scope.restoreVersions.filters['start'] = minDate;
+                            $scope.restoreVersions.filters['end'] = maxDate;
+
+                            var ranges = {
+                                'All time': [minDate, maxDate],
+                                'Today': [moment(), moment()],
+                                'Yesterday': [moment().subtract(1, 'days'), moment().subtract(1, 'days')],
+                                'Last 7 Days': [moment().subtract(6, 'days'), moment()],
+                                'Last 30 Days': [moment().subtract(29, 'days'), moment()],
+                                'This Month': [moment().startOf('month'), moment().endOf('month')],
+                                'Last Month': [moment().subtract(1, 'month').startOf('month'), moment().subtract(1, 'month').endOf('month')]
+                            };
+
+                            // Filter out invalid ranges.
+                            $.each(ranges, function (key, range) {
+                                if (!range[0].isBetween(minDate, maxDate, null, '[]') && !range[1].isBetween(minDate, maxDate, null, '[]')) {
+                                    delete ranges[key];
                                 }
                             });
-                        });
 
-                        $scope.restoreVersions.filters['start'] = minDate;
-                        $scope.restoreVersions.filters['end'] = maxDate;
-
-                        var ranges = {
-                           'All time': [minDate, maxDate],
-                           'Today': [moment(), moment()],
-                           'Yesterday': [moment().subtract(1, 'days'), moment().subtract(1, 'days')],
-                           'Last 7 Days': [moment().subtract(6, 'days'), moment()],
-                           'Last 30 Days': [moment().subtract(29, 'days'), moment()],
-                           'This Month': [moment().startOf('month'), moment().endOf('month')],
-                           'Last Month': [moment().subtract(1, 'month').startOf('month'), moment().subtract(1, 'month').endOf('month')]
-                        };
-
-                        // Filter out invalid ranges.
-                        $.each(ranges, function(key, range) {
-                            if (!range[0].isBetween(minDate, maxDate, null, '[]') && !range[1].isBetween(minDate, maxDate, null, '[]')) {
-                                delete ranges[key];
-                            }
-                        });
-
-                        $("#restoreVersionDateRange").daterangepicker({
-                            timePicker: true,
-                            timePicker24Hour: true,
-                            timePickerSeconds: true,
-                            autoUpdateInput: true,
-                            opens: "left",
-                            drops: "up",
-                            startDate: minDate,
-                            endDate: maxDate,
-                            minDate: minDate,
-                            maxDate: maxDate,
-                            ranges: ranges,
-                            locale: {
-                                format: 'YYYY/MM/DD HH:mm:ss',
-                            }
-                        }).on('apply.daterangepicker', function(ev, picker) {
-                            $scope.restoreVersions.filters['start'] = picker.startDate;
-                            $scope.restoreVersions.filters['end'] = picker.endDate;
-                            // Events for this UI element are not managed by angular.
-                            // Force angular to wake up.
-                            $timeout(function() {
-                                $scope.$apply();
+                            $("#restoreVersionDateRange").daterangepicker({
+                                timePicker: true,
+                                timePicker24Hour: true,
+                                timePickerSeconds: true,
+                                autoUpdateInput: true,
+                                opens: "left",
+                                drops: "up",
+                                startDate: minDate,
+                                endDate: maxDate,
+                                minDate: minDate,
+                                maxDate: maxDate,
+                                ranges: ranges,
+                                locale: {
+                                    format: 'YYYY/MM/DD HH:mm:ss',
+                                }
+                            }).on('apply.daterangepicker', function (ev, picker) {
+                                $scope.restoreVersions.filters['start'] = picker.startDate;
+                                $scope.restoreVersions.filters['end'] = picker.endDate;
+                                // Events for this UI element are not managed by angular.
+                                // Force angular to wake up.
+                                $timeout(function () {
+                                    $scope.$apply();
+                                });
                             });
                         });
                     });
@@ -2084,7 +2118,7 @@ angular.module('syncthing.core')
         }
         resetRestoreVersions();
 
-        $scope.$watchCollection('restoreVersions.filters', function() {
+        $scope.$watchCollection('restoreVersions.filters', function () {
             if (!$scope.restoreVersions.tree) return;
 
             $scope.restoreVersions.tree.filterNodes(function (node) {
@@ -2134,7 +2168,7 @@ angular.module('syncthing.core')
         $scope.showRemoteNeed = function (device) {
             resetRemoteNeed();
             $scope.remoteNeedDevice = device;
-            $scope.deviceFolders(device).forEach(function(folder) {
+            $scope.deviceFolders(device).forEach(function (folder) {
                 var comp = $scope.completion[device.deviceID][folder];
                 if (comp !== undefined && comp.needItems + comp.needDeletes === 0) {
                     return;
@@ -2159,11 +2193,19 @@ angular.module('syncthing.core')
             if (!$scope.model[folder]) {
                 return false;
             }
-            return $scope.model[folder].pullErrors !== 0;
+            return $scope.model[folder].errors !== 0;
         };
 
         $scope.override = function (folder) {
             $http.post(urlbase + "/db/override?folder=" + encodeURIComponent(folder));
+        };
+
+        $scope.showLocalChanged = function (folder) {
+            $scope.localChangedFolder = folder;
+            $scope.localChanged = $scope.refreshLocalChanged(1, 10);
+            $('#localChanged').modal().one('hidden.bs.modal', function () {
+                $scope.localChanged = {};
+            });
         };
 
         $scope.revert = function (folder) {
@@ -2175,11 +2217,7 @@ angular.module('syncthing.core')
             if (!f) {
                 return false;
             }
-            return f.receiveOnlyChangedBytes > 0 ||
-                f.receiveOnlyChangedDeletes > 0 ||
-                f.receiveOnlyChangedDirectories > 0 ||
-                f.receiveOnlyChangedFiles > 0 ||
-                f.receiveOnlyChangedSymlinks > 0;
+            return $scope.model[folder].receiveOnlyTotalItems > 0;
         };
 
         $scope.advanced = function () {
@@ -2200,11 +2238,11 @@ angular.module('syncthing.core')
             if ($scope.reportDataPreviewDiff && version > 2) {
                 $q.all([
                     $http.get(urlbase + '/svc/report?version=' + version),
-                    $http.get(urlbase + '/svc/report?version=' + (version-1)),
+                    $http.get(urlbase + '/svc/report?version=' + (version - 1)),
                 ]).then(function (responses) {
                     var newReport = responses[0].data;
                     var oldReport = responses[1].data;
-                    angular.forEach(oldReport, function(_, key) {
+                    angular.forEach(oldReport, function (_, key) {
                         delete newReport[key];
                     });
                     $scope.reportDataPreview = newReport;
@@ -2224,7 +2262,7 @@ angular.module('syncthing.core')
             $http.post(urlbase + "/db/scan?folder=" + encodeURIComponent(folder));
         };
 
-        $scope.setAllFoldersPause = function(pause) {
+        $scope.setAllFoldersPause = function (pause) {
             var folderListCache = $scope.folderList();
 
             for (var i = 0; i < folderListCache.length; i++) {
@@ -2235,7 +2273,7 @@ angular.module('syncthing.core')
             $scope.saveConfig();
         };
 
-        $scope.isAtleastOneFolderPausedStateSetTo = function(pause) {
+        $scope.isAtleastOneFolderPausedStateSetTo = function (pause) {
             var folderListCache = $scope.folderList();
 
             for (var i = 0; i < folderListCache.length; i++) {
@@ -2247,10 +2285,10 @@ angular.module('syncthing.core')
             return false;
         };
 
-        $scope.activateAllFsWatchers = function() {
+        $scope.activateAllFsWatchers = function () {
             var folders = $scope.folderList();
 
-            $.each(folders, function(i) {
+            $.each(folders, function (i) {
                 if (folders[i].fsWatcherEnabled) {
                     return;
                 }
@@ -2298,7 +2336,7 @@ angular.module('syncthing.core')
                 'solaris': 'Solaris'
             }[$scope.version.os] || $scope.version.os;
 
-            var arch ={
+            var arch = {
                 '386': '32 bit',
                 'amd64': '64 bit',
                 'arm': 'ARM',
@@ -2368,4 +2406,14 @@ angular.module('syncthing.core')
                 $scope.saveConfig();
             }
         };
+
+        $scope.abbreviatedError = function (addr) {
+            var status = $scope.system.lastDialStatus[addr];
+            if (!status || !status.error) {
+                return null;
+            }
+            var time = $filter('date')(status.when, "HH:mm:ss")
+            var err = status.error.replace(/.+: /, '');
+            return err + " (" + time + ")";
+        }
     });

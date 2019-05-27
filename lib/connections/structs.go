@@ -9,7 +9,6 @@ package connections
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"time"
@@ -23,12 +22,12 @@ import (
 // that can be closed and has some metadata.
 type Connection interface {
 	protocol.Connection
-	io.Closer
 	Type() string
 	Transport() string
 	RemoteAddr() net.Addr
 	Priority() int
 	String() string
+	Crypto() string
 }
 
 // completeConn is the aggregation of an internalConn and the
@@ -37,6 +36,11 @@ type Connection interface {
 type completeConn struct {
 	internalConn
 	protocol.Connection
+}
+
+func (c completeConn) Close(err error) {
+	c.Connection.Close(err)
+	c.internalConn.Close()
 }
 
 // internalConn is the raw TLS connection plus some metadata on where it
@@ -82,12 +86,25 @@ func (t connType) Transport() string {
 	}
 }
 
+func (c internalConn) Close() {
+	// *tls.Conn.Close() does more than it says on the tin. Specifically, it
+	// sends a TLS alert message, which might block forever if the
+	// connection is dead and we don't have a deadline set.
+	c.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
+	c.Conn.Close()
+}
+
 func (c internalConn) Type() string {
 	return c.connType.String()
 }
 
 func (c internalConn) Priority() int {
 	return c.priority
+}
+
+func (c internalConn) Crypto() string {
+	cs := c.ConnectionState()
+	return fmt.Sprintf("%s-%s", tlsVersionNames[cs.Version], tlsCipherSuiteNames[cs.CipherSuite])
 }
 
 func (c internalConn) Transport() string {
@@ -107,11 +124,11 @@ func (c internalConn) Transport() string {
 }
 
 func (c internalConn) String() string {
-	return fmt.Sprintf("%s-%s/%s", c.LocalAddr(), c.RemoteAddr(), c.Type())
+	return fmt.Sprintf("%s-%s/%s/%s", c.LocalAddr(), c.RemoteAddr(), c.Type(), c.Crypto())
 }
 
 type dialerFactory interface {
-	New(*config.Wrapper, *tls.Config) genericDialer
+	New(config.Wrapper, *tls.Config) genericDialer
 	Priority() int
 	AlwaysWAN() bool
 	Valid(config.Configuration) error
@@ -124,7 +141,7 @@ type genericDialer interface {
 }
 
 type listenerFactory interface {
-	New(*url.URL, *config.Wrapper, *tls.Config, chan internalConn, *nat.Service) genericListener
+	New(*url.URL, config.Wrapper, *tls.Config, chan internalConn, *nat.Service) genericListener
 	Valid(config.Configuration) error
 }
 
@@ -178,6 +195,7 @@ func (o *onAddressesChangedNotifier) notifyAddressesChanged(l genericListener) {
 }
 
 type dialTarget struct {
+	addr     string
 	dialer   genericDialer
 	priority int
 	uri      *url.URL

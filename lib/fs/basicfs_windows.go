@@ -153,20 +153,20 @@ func (f *BasicFilesystem) Roots() ([]string, error) {
 }
 
 // unrootedChecked returns the path relative to the folder root (same as
-// unrooted). It panics if the given path is not a subpath and handles the
+// unrooted) or an error if the given path is not a subpath and handles the
 // special case when the given path is the folder root without a trailing
 // pathseparator.
-func (f *BasicFilesystem) unrootedChecked(absPath, root string) string {
+func (f *BasicFilesystem) unrootedChecked(absPath, root string) (string, error) {
 	absPath = f.resolveWin83(absPath)
 	lowerAbsPath := UnicodeLowercase(absPath)
 	lowerRoot := UnicodeLowercase(root)
 	if lowerAbsPath+string(PathSeparator) == lowerRoot {
-		return "."
+		return ".", nil
 	}
 	if !strings.HasPrefix(lowerAbsPath, lowerRoot) {
-		panic(fmt.Sprintf("bug: Notify backend is processing a change outside of the filesystem root: f.root==%v, root==%v (lower), path==%v (lower)", f.root, lowerRoot, lowerAbsPath))
+		return "", f.newErrWatchEventOutsideRoot(lowerAbsPath, lowerRoot)
 	}
-	return rel(absPath, root)
+	return rel(absPath, root), nil
 }
 
 func rel(path, prefix string) string {
@@ -221,4 +221,29 @@ func evalSymlinks(in string) (string, error) {
 		return "", err
 	}
 	return longFilenameSupport(out), nil
+}
+
+// watchPaths adjust the folder root for use with the notify backend and the
+// corresponding absolute path to be passed to notify to watch name.
+func (f *BasicFilesystem) watchPaths(name string) (string, string, error) {
+	root, err := evalSymlinks(f.root)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Remove `\\?\` prefix if the path is just a drive letter as a dirty
+	// fix for https://github.com/syncthing/syncthing/issues/5578
+	if filepath.Clean(name) == "." && len(root) <= 7 && len(root) > 4 && root[:4] == `\\?\` {
+		root = root[4:]
+	}
+
+	absName, err := rooted(name, root)
+	if err != nil {
+		return "", "", err
+	}
+
+	root = f.resolveWin83(root)
+	absName = f.resolveWin83(absName)
+
+	return filepath.Join(absName, "..."), root, nil
 }

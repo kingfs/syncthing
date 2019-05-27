@@ -41,13 +41,25 @@ const (
 var BlockSizes []int
 
 // For each block size, the hash of a block of all zeroes
-var sha256OfEmptyBlock = make(map[int][sha256.Size]byte)
+var sha256OfEmptyBlock = map[int][sha256.Size]byte{
+	128 << KiB: {0xfa, 0x43, 0x23, 0x9b, 0xce, 0xe7, 0xb9, 0x7c, 0xa6, 0x2f, 0x0, 0x7c, 0xc6, 0x84, 0x87, 0x56, 0xa, 0x39, 0xe1, 0x9f, 0x74, 0xf3, 0xdd, 0xe7, 0x48, 0x6d, 0xb3, 0xf9, 0x8d, 0xf8, 0xe4, 0x71},
+	256 << KiB: {0x8a, 0x39, 0xd2, 0xab, 0xd3, 0x99, 0x9a, 0xb7, 0x3c, 0x34, 0xdb, 0x24, 0x76, 0x84, 0x9c, 0xdd, 0xf3, 0x3, 0xce, 0x38, 0x9b, 0x35, 0x82, 0x68, 0x50, 0xf9, 0xa7, 0x0, 0x58, 0x9b, 0x4a, 0x90},
+	512 << KiB: {0x7, 0x85, 0x4d, 0x2f, 0xef, 0x29, 0x7a, 0x6, 0xba, 0x81, 0x68, 0x5e, 0x66, 0xc, 0x33, 0x2d, 0xe3, 0x6d, 0x5d, 0x18, 0xd5, 0x46, 0x92, 0x7d, 0x30, 0xda, 0xad, 0x6d, 0x7f, 0xda, 0x15, 0x41},
+	1 << MiB:   {0x30, 0xe1, 0x49, 0x55, 0xeb, 0xf1, 0x35, 0x22, 0x66, 0xdc, 0x2f, 0xf8, 0x6, 0x7e, 0x68, 0x10, 0x46, 0x7, 0xe7, 0x50, 0xab, 0xb9, 0xd3, 0xb3, 0x65, 0x82, 0xb8, 0xaf, 0x90, 0x9f, 0xcb, 0x58},
+	2 << MiB:   {0x56, 0x47, 0xf0, 0x5e, 0xc1, 0x89, 0x58, 0x94, 0x7d, 0x32, 0x87, 0x4e, 0xeb, 0x78, 0x8f, 0xa3, 0x96, 0xa0, 0x5d, 0xb, 0xab, 0x7c, 0x1b, 0x71, 0xf1, 0x12, 0xce, 0xb7, 0xe9, 0xb3, 0x1e, 0xee},
+	4 << MiB:   {0xbb, 0x9f, 0x8d, 0xf6, 0x14, 0x74, 0xd2, 0x5e, 0x71, 0xfa, 0x0, 0x72, 0x23, 0x18, 0xcd, 0x38, 0x73, 0x96, 0xca, 0x17, 0x36, 0x60, 0x5e, 0x12, 0x48, 0x82, 0x1c, 0xc0, 0xde, 0x3d, 0x3a, 0xf8},
+	8 << MiB:   {0x2d, 0xae, 0xb1, 0xf3, 0x60, 0x95, 0xb4, 0x4b, 0x31, 0x84, 0x10, 0xb3, 0xf4, 0xe8, 0xb5, 0xd9, 0x89, 0xdc, 0xc7, 0xbb, 0x2, 0x3d, 0x14, 0x26, 0xc4, 0x92, 0xda, 0xb0, 0xa3, 0x5, 0x3e, 0x74},
+	16 << MiB:  {0x8, 0xa, 0xcf, 0x35, 0xa5, 0x7, 0xac, 0x98, 0x49, 0xcf, 0xcb, 0xa4, 0x7d, 0xc2, 0xad, 0x83, 0xe0, 0x1b, 0x75, 0x66, 0x3a, 0x51, 0x62, 0x79, 0xc8, 0xb9, 0xd2, 0x43, 0xb7, 0x19, 0x64, 0x3e},
+}
 
 func init() {
 	for blockSize := MinBlockSize; blockSize <= MaxBlockSize; blockSize *= 2 {
 		BlockSizes = append(BlockSizes, blockSize)
-		sha256OfEmptyBlock[blockSize] = sha256.Sum256(make([]byte, blockSize))
+		if _, ok := sha256OfEmptyBlock[blockSize]; !ok {
+			panic("missing hard coded value for sha256 of empty block")
+		}
 	}
+	BufferPool = newBufferPool()
 }
 
 // BlockSize returns the block size to use for the given file size
@@ -125,7 +137,7 @@ type Model interface {
 	// An index update was received from the peer device
 	IndexUpdate(deviceID DeviceID, folder string, files []FileInfo)
 	// A request was made by the peer device
-	Request(deviceID DeviceID, folder string, name string, offset int64, hash []byte, weakHash uint32, fromTemporary bool, buf []byte) error
+	Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error)
 	// A cluster configuration message was received
 	ClusterConfig(deviceID DeviceID, config ClusterConfig)
 	// The peer device closed the connection
@@ -134,8 +146,15 @@ type Model interface {
 	DownloadProgress(deviceID DeviceID, folder string, updates []FileDownloadProgressUpdate)
 }
 
+type RequestResponse interface {
+	Data() []byte
+	Close() // Must always be called once the byte slice is no longer in use
+	Wait()  // Blocks until Close is called
+}
+
 type Connection interface {
 	Start()
+	Close(err error)
 	ID() DeviceID
 	Name() string
 	Index(folder string, files []FileInfo) error
@@ -163,11 +182,13 @@ type rawConnection struct {
 	nextID    int32
 	nextIDMut sync.Mutex
 
-	outbox      chan asyncMessage
-	closed      chan struct{}
-	once        sync.Once
-	pool        bufferPool
-	compression Compression
+	inbox                 chan message
+	outbox                chan asyncMessage
+	dispatcherLoopStopped chan struct{}
+	closed                chan struct{}
+	closeOnce             sync.Once
+	sendCloseOnce         sync.Once
+	compression           Compression
 }
 
 type asyncResult struct {
@@ -184,7 +205,7 @@ type message interface {
 
 type asyncMessage struct {
 	msg  message
-	done chan struct{} // done closes when we're done marshalling the message and its contents can be reused
+	done chan struct{} // done closes when we're done sending the message
 }
 
 const (
@@ -196,27 +217,22 @@ const (
 	ReceiveTimeout = 300 * time.Second
 )
 
-// A buffer pool for global use. We don't allocate smaller buffers than 64k,
-// in the hope of being able to reuse them later.
-var buffers = bufferPool{
-	minSize: 64 << 10,
-}
-
 func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) Connection {
 	cr := &countingReader{Reader: reader}
 	cw := &countingWriter{Writer: writer}
 
 	c := rawConnection{
-		id:          deviceID,
-		name:        name,
-		receiver:    nativeModel{receiver},
-		cr:          cr,
-		cw:          cw,
-		awaiting:    make(map[int32]chan asyncResult),
-		outbox:      make(chan asyncMessage),
-		closed:      make(chan struct{}),
-		pool:        bufferPool{minSize: MinBlockSize},
-		compression: compress,
+		id:                    deviceID,
+		name:                  name,
+		receiver:              nativeModel{receiver},
+		cr:                    cr,
+		cw:                    cw,
+		awaiting:              make(map[int32]chan asyncResult),
+		inbox:                 make(chan message),
+		outbox:                make(chan asyncMessage),
+		dispatcherLoopStopped: make(chan struct{}),
+		closed:                make(chan struct{}),
+		compression:           compress,
 	}
 
 	return wireFormatConnection{&c}
@@ -226,6 +242,10 @@ func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiv
 // be called exactly once after creating a connection.
 func (c *rawConnection) Start() {
 	go c.readerLoop()
+	go func() {
+		err := c.dispatcherLoop()
+		c.internalClose(err)
+	}()
 	go c.writerLoop()
 	go c.pingSender()
 	go c.pingReceiver()
@@ -333,28 +353,37 @@ func (c *rawConnection) ping() bool {
 	return c.send(&Ping{}, nil)
 }
 
-func (c *rawConnection) readerLoop() (err error) {
-	defer func() {
-		c.close(err)
-	}()
+func (c *rawConnection) readerLoop() {
+	fourByteBuf := make([]byte, 4)
+	for {
+		msg, err := c.readMessage(fourByteBuf)
+		if err != nil {
+			if err == errUnknownMessage {
+				// Unknown message types are skipped, for future extensibility.
+				continue
+			}
+			c.internalClose(err)
+			return
+		}
+		select {
+		case c.inbox <- msg:
+		case <-c.closed:
+			return
+		}
 
+	}
+}
+
+func (c *rawConnection) dispatcherLoop() (err error) {
+	defer close(c.dispatcherLoopStopped)
+	var msg message
 	state := stateInitial
 	for {
 		select {
+		case msg = <-c.inbox:
 		case <-c.closed:
 			return ErrClosed
-		default:
 		}
-
-		msg, err := c.readMessage()
-		if err == errUnknownMessage {
-			// Unknown message types are skipped, for future extensibility.
-			continue
-		}
-		if err != nil {
-			return err
-		}
-
 		switch msg := msg.(type) {
 		case *ClusterConfig:
 			l.Debugln("read ClusterConfig message")
@@ -394,7 +423,6 @@ func (c *rawConnection) readerLoop() (err error) {
 			if err := checkFilename(msg.Name); err != nil {
 				return fmt.Errorf("protocol error: request: %q: %v", msg.Name, err)
 			}
-			// Requests are handled asynchronously
 			go c.handleRequest(*msg)
 
 		case *Response:
@@ -429,30 +457,29 @@ func (c *rawConnection) readerLoop() (err error) {
 	}
 }
 
-func (c *rawConnection) readMessage() (message, error) {
-	hdr, err := c.readHeader()
+func (c *rawConnection) readMessage(fourByteBuf []byte) (message, error) {
+	hdr, err := c.readHeader(fourByteBuf)
 	if err != nil {
 		return nil, err
 	}
 
-	return c.readMessageAfterHeader(hdr)
+	return c.readMessageAfterHeader(hdr, fourByteBuf)
 }
 
-func (c *rawConnection) readMessageAfterHeader(hdr Header) (message, error) {
+func (c *rawConnection) readMessageAfterHeader(hdr Header, fourByteBuf []byte) (message, error) {
 	// First comes a 4 byte message length
 
-	buf := buffers.get(4)
-	if _, err := io.ReadFull(c.cr, buf); err != nil {
+	if _, err := io.ReadFull(c.cr, fourByteBuf[:4]); err != nil {
 		return nil, fmt.Errorf("reading message length: %v", err)
 	}
-	msgLen := int32(binary.BigEndian.Uint32(buf))
+	msgLen := int32(binary.BigEndian.Uint32(fourByteBuf))
 	if msgLen < 0 {
 		return nil, fmt.Errorf("negative message length %d", msgLen)
 	}
 
 	// Then comes the message
 
-	buf = buffers.upgrade(buf, int(msgLen))
+	buf := BufferPool.Get(int(msgLen))
 	if _, err := io.ReadFull(c.cr, buf); err != nil {
 		return nil, fmt.Errorf("reading message: %v", err)
 	}
@@ -465,7 +492,7 @@ func (c *rawConnection) readMessageAfterHeader(hdr Header) (message, error) {
 
 	case MessageCompressionLZ4:
 		decomp, err := c.lz4Decompress(buf)
-		buffers.put(buf)
+		BufferPool.Put(buf)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing message: %v", err)
 		}
@@ -484,26 +511,25 @@ func (c *rawConnection) readMessageAfterHeader(hdr Header) (message, error) {
 	if err := msg.Unmarshal(buf); err != nil {
 		return nil, fmt.Errorf("unmarshalling message: %v", err)
 	}
-	buffers.put(buf)
+	BufferPool.Put(buf)
 
 	return msg, nil
 }
 
-func (c *rawConnection) readHeader() (Header, error) {
+func (c *rawConnection) readHeader(fourByteBuf []byte) (Header, error) {
 	// First comes a 2 byte header length
 
-	buf := buffers.get(2)
-	if _, err := io.ReadFull(c.cr, buf); err != nil {
+	if _, err := io.ReadFull(c.cr, fourByteBuf[:2]); err != nil {
 		return Header{}, fmt.Errorf("reading length: %v", err)
 	}
-	hdrLen := int16(binary.BigEndian.Uint16(buf))
+	hdrLen := int16(binary.BigEndian.Uint16(fourByteBuf))
 	if hdrLen < 0 {
 		return Header{}, fmt.Errorf("negative header length %d", hdrLen)
 	}
 
 	// Then comes the header
 
-	buf = buffers.upgrade(buf, int(hdrLen))
+	buf := BufferPool.Get(int(hdrLen))
 	if _, err := io.ReadFull(c.cr, buf); err != nil {
 		return Header{}, fmt.Errorf("reading header: %v", err)
 	}
@@ -513,7 +539,7 @@ func (c *rawConnection) readHeader() (Header, error) {
 		return Header{}, fmt.Errorf("unmarshalling header: %v", err)
 	}
 
-	buffers.put(buf)
+	BufferPool.Put(buf)
 	return hdr, nil
 }
 
@@ -590,38 +616,22 @@ func checkFilename(name string) error {
 }
 
 func (c *rawConnection) handleRequest(req Request) {
-	size := int(req.Size)
-	usePool := size <= MaxBlockSize
-
-	var buf []byte
-	var done chan struct{}
-
-	if usePool {
-		buf = c.pool.get(size)
-		done = make(chan struct{})
-	} else {
-		buf = make([]byte, size)
-	}
-
-	err := c.receiver.Request(c.id, req.Folder, req.Name, req.Offset, req.Hash, req.WeakHash, req.FromTemporary, buf)
+	res, err := c.receiver.Request(c.id, req.Folder, req.Name, req.Size, req.Offset, req.Hash, req.WeakHash, req.FromTemporary)
 	if err != nil {
 		c.send(&Response{
 			ID:   req.ID,
-			Data: nil,
 			Code: errorToCode(err),
-		}, done)
-	} else {
-		c.send(&Response{
-			ID:   req.ID,
-			Data: buf,
-			Code: errorToCode(err),
-		}, done)
+		}, nil)
+		return
 	}
-
-	if usePool {
-		<-done
-		c.pool.put(buf)
-	}
+	done := make(chan struct{})
+	c.send(&Response{
+		ID:   req.ID,
+		Data: res.Data(),
+		Code: errorToCode(nil),
+	}, done)
+	<-done
+	res.Close()
 }
 
 func (c *rawConnection) handleResponse(resp Response) {
@@ -639,6 +649,9 @@ func (c *rawConnection) send(msg message, done chan struct{}) bool {
 	case c.outbox <- asyncMessage{msg, done}:
 		return true
 	case <-c.closed:
+		if done != nil {
+			close(done)
+		}
 		return false
 	}
 }
@@ -647,8 +660,12 @@ func (c *rawConnection) writerLoop() {
 	for {
 		select {
 		case hm := <-c.outbox:
-			if err := c.writeMessage(hm); err != nil {
-				c.close(err)
+			err := c.writeMessage(hm.msg)
+			if hm.done != nil {
+				close(hm.done)
+			}
+			if err != nil {
+				c.internalClose(err)
 				return
 			}
 
@@ -658,21 +675,18 @@ func (c *rawConnection) writerLoop() {
 	}
 }
 
-func (c *rawConnection) writeMessage(hm asyncMessage) error {
-	if c.shouldCompressMessage(hm.msg) {
-		return c.writeCompressedMessage(hm)
+func (c *rawConnection) writeMessage(msg message) error {
+	if c.shouldCompressMessage(msg) {
+		return c.writeCompressedMessage(msg)
 	}
-	return c.writeUncompressedMessage(hm)
+	return c.writeUncompressedMessage(msg)
 }
 
-func (c *rawConnection) writeCompressedMessage(hm asyncMessage) error {
-	size := hm.msg.ProtoSize()
-	buf := buffers.get(size)
-	if _, err := hm.msg.MarshalTo(buf); err != nil {
+func (c *rawConnection) writeCompressedMessage(msg message) error {
+	size := msg.ProtoSize()
+	buf := BufferPool.Get(size)
+	if _, err := msg.MarshalTo(buf); err != nil {
 		return fmt.Errorf("marshalling message: %v", err)
-	}
-	if hm.done != nil {
-		close(hm.done)
 	}
 
 	compressed, err := c.lz4Compress(buf)
@@ -681,7 +695,7 @@ func (c *rawConnection) writeCompressedMessage(hm asyncMessage) error {
 	}
 
 	hdr := Header{
-		Type:        c.typeOf(hm.msg),
+		Type:        c.typeOf(msg),
 		Compression: MessageCompressionLZ4,
 	}
 	hdrSize := hdr.ProtoSize()
@@ -690,7 +704,7 @@ func (c *rawConnection) writeCompressedMessage(hm asyncMessage) error {
 	}
 
 	totSize := 2 + hdrSize + 4 + len(compressed)
-	buf = buffers.upgrade(buf, totSize)
+	buf = BufferPool.Upgrade(buf, totSize)
 
 	// Header length
 	binary.BigEndian.PutUint16(buf, uint16(hdrSize))
@@ -702,10 +716,10 @@ func (c *rawConnection) writeCompressedMessage(hm asyncMessage) error {
 	binary.BigEndian.PutUint32(buf[2+hdrSize:], uint32(len(compressed)))
 	// Message
 	copy(buf[2+hdrSize+4:], compressed)
-	buffers.put(compressed)
+	BufferPool.Put(compressed)
 
 	n, err := c.cw.Write(buf)
-	buffers.put(buf)
+	BufferPool.Put(buf)
 
 	l.Debugf("wrote %d bytes on the wire (2 bytes length, %d bytes header, 4 bytes message length, %d bytes message (%d uncompressed)), err=%v", n, hdrSize, len(compressed), size, err)
 	if err != nil {
@@ -714,11 +728,11 @@ func (c *rawConnection) writeCompressedMessage(hm asyncMessage) error {
 	return nil
 }
 
-func (c *rawConnection) writeUncompressedMessage(hm asyncMessage) error {
-	size := hm.msg.ProtoSize()
+func (c *rawConnection) writeUncompressedMessage(msg message) error {
+	size := msg.ProtoSize()
 
 	hdr := Header{
-		Type: c.typeOf(hm.msg),
+		Type: c.typeOf(msg),
 	}
 	hdrSize := hdr.ProtoSize()
 	if hdrSize > 1<<16-1 {
@@ -726,7 +740,7 @@ func (c *rawConnection) writeUncompressedMessage(hm asyncMessage) error {
 	}
 
 	totSize := 2 + hdrSize + 4 + size
-	buf := buffers.get(totSize)
+	buf := BufferPool.Get(totSize)
 
 	// Header length
 	binary.BigEndian.PutUint16(buf, uint16(hdrSize))
@@ -737,15 +751,12 @@ func (c *rawConnection) writeUncompressedMessage(hm asyncMessage) error {
 	// Message length
 	binary.BigEndian.PutUint32(buf[2+hdrSize:], uint32(size))
 	// Message
-	if _, err := hm.msg.MarshalTo(buf[2+hdrSize+4:]); err != nil {
+	if _, err := msg.MarshalTo(buf[2+hdrSize+4:]); err != nil {
 		return fmt.Errorf("marshalling message: %v", err)
-	}
-	if hm.done != nil {
-		close(hm.done)
 	}
 
 	n, err := c.cw.Write(buf[:totSize])
-	buffers.put(buf)
+	BufferPool.Put(buf)
 
 	l.Debugf("wrote %d bytes on the wire (2 bytes length, %d bytes header, 4 bytes message length, %d bytes message), err=%v", n, hdrSize, size, err)
 	if err != nil {
@@ -819,8 +830,28 @@ func (c *rawConnection) shouldCompressMessage(msg message) bool {
 	}
 }
 
-func (c *rawConnection) close(err error) {
-	c.once.Do(func() {
+// Close is called when the connection is regularely closed and thus the Close
+// BEP message is sent before terminating the actual connection. The error
+// argument specifies the reason for closing the connection.
+func (c *rawConnection) Close(err error) {
+	c.sendCloseOnce.Do(func() {
+		done := make(chan struct{})
+		c.send(&Close{err.Error()}, done)
+		select {
+		case <-done:
+		case <-c.closed:
+		}
+	})
+
+	// No more sends are necessary, therefore further steps to close the
+	// connection outside of this package can proceed immediately.
+	// And this prevents a potential deadlock due to calling c.receiver.Closed
+	go c.internalClose(err)
+}
+
+// internalClose is called if there is an unexpected error during normal operation.
+func (c *rawConnection) internalClose(err error) {
+	c.closeOnce.Do(func() {
 		l.Debugln("close due to", err)
 		close(c.closed)
 
@@ -832,6 +863,8 @@ func (c *rawConnection) close(err error) {
 			}
 		}
 		c.awaitingMut.Unlock()
+
+		<-c.dispatcherLoopStopped
 
 		c.receiver.Closed(c, err)
 	})
@@ -877,7 +910,7 @@ func (c *rawConnection) pingReceiver() {
 			d := time.Since(c.cr.Last())
 			if d > ReceiveTimeout {
 				l.Debugln(c.id, "ping timeout", d)
-				c.close(ErrTimeout)
+				c.internalClose(ErrTimeout)
 			}
 
 			l.Debugln(c.id, "last read within", d)
@@ -904,7 +937,7 @@ func (c *rawConnection) Statistics() Statistics {
 
 func (c *rawConnection) lz4Compress(src []byte) ([]byte, error) {
 	var err error
-	buf := buffers.get(len(src))
+	buf := BufferPool.Get(len(src))
 	buf, err = lz4.Encode(buf, src)
 	if err != nil {
 		return nil, err
@@ -918,7 +951,7 @@ func (c *rawConnection) lz4Decompress(src []byte) ([]byte, error) {
 	size := binary.BigEndian.Uint32(src)
 	binary.LittleEndian.PutUint32(src, size)
 	var err error
-	buf := buffers.get(int(size))
+	buf := BufferPool.Get(int(size))
 	buf, err = lz4.Decode(buf, src)
 	if err != nil {
 		return nil, err
